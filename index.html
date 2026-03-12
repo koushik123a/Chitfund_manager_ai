@@ -1170,7 +1170,6 @@ option { background: white; }
       <button class="back-btn" id="back-btn" onclick="goBack()">← Back</button>
       <span class="topbar-right" id="topbar-ctx"></span>
       <button class="backup-btn" onclick="openModal('backup-modal')" title="Backup & Restore">💾</button>
-      <button class="backup-btn" onclick="openSettings()" title="Settings">⚙️</button>
     </div>
   </div>
 
@@ -4589,8 +4588,12 @@ function confirmCloseLoan() {
 // ASK RATHU — Gemini Conversational UI
 // ═══════════════════════════════════════════════
 
-// ── API KEY — stored in localStorage, never in any file ──
-const GEMINI_KEY = localStorage.getItem('cm_gemini_key') || null;
+// ── EDIT YOUR API KEY HERE ──────────────────────
+// API key is stored in localStorage — never hardcoded in the file
+function getGeminiKey() { return localStorage.getItem('ratna_gemini_key') || ''; }
+function setGeminiKey(k) { localStorage.setItem('ratna_gemini_key', k.trim()); }
+function clearGeminiKey() { localStorage.removeItem('ratna_gemini_key'); }
+// ───────────────────────────────────────────────
 
 const RATHU = {
   messages: [],   // { role: 'user'|'ai', text, time }
@@ -4638,37 +4641,60 @@ LOANS:
 ${loans || 'No loans recorded.'}`;
   },
 
-  // Call Gemini API
+  // Call Gemini API with model fallback
   async ask(question) {
-    const key = localStorage.getItem('cm_gemini_key');
-    if (!key) {
-      return "⚠️ No API key set. Tap the ⚙️ icon in the top bar to add your Gemini key.";
+    const GEMINI_KEY = getGeminiKey();
+    if (!GEMINI_KEY) {
+      return "⚠️ No API key set. Tap the key icon in the Ask Rathu header to add your Gemini API key.";
     }
     const systemCtx = this.buildContext();
     const contents = [];
-    for (const msg of this.messages.slice(-6)) {
+    const recent = this.messages.slice(-6);
+    for (const msg of recent) {
       contents.push({ role: msg.role === 'user' ? 'user' : 'model', parts: [{ text: msg.text }] });
     }
     contents.push({ role: 'user', parts: [{ text: question }] });
 
-    const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${key}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          system_instruction: { parts: [{ text: systemCtx }] },
-          contents,
-          generationConfig: { maxOutputTokens: 600, temperature: 0.3 }
-        })
+    const body = JSON.stringify({
+      system_instruction: { parts: [{ text: systemCtx }] },
+      contents,
+      generationConfig: { maxOutputTokens: 500, temperature: 0.3 }
+    });
+
+    // Try models in order until one works
+    const models = ['gemini-2.0-flash-lite', 'gemini-2.0-flash-001', 'gemini-2.0-flash', 'gemini-2.5-flash'];
+    let lastError = null;
+    for (const model of models) {
+      try {
+        const res = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_KEY}`,
+          { method: 'POST', headers: { 'Content-Type': 'application/json' }, body }
+        );
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          const msg = err?.error?.message || '';
+          // If quota/billing error, try next model
+          if (res.status === 429 || msg.includes('quota') || msg.includes('limit: 0')) {
+            lastError = `${model}: quota exceeded`;
+            continue;
+          }
+          throw new Error(msg || `API error ${res.status}`);
+        }
+        const data = await res.json();
+        const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (!text) throw new Error('Empty response');
+        // Remember which model worked
+        this._workingModel = model;
+        return text;
+      } catch (e) {
+        if (e.message.includes('quota') || e.message.includes('limit')) {
+          lastError = e.message;
+          continue;
+        }
+        throw e;
       }
-    );
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err?.error?.message || `API error ${res.status}`);
     }
-    const data = await res.json();
-    return data.candidates?.[0]?.content?.parts?.[0]?.text || 'No response received.';
+    throw new Error(`All models quota exceeded. Please enable billing at aistudio.google.com to use Gemini API. (${lastError})`);
   },
 
   // Handle ACTION tokens in response
@@ -4719,7 +4745,6 @@ function renderAsk() {
   showSearchBar(false);
   const el = document.getElementById('scroll');
 
-  const hasKey = !!localStorage.getItem('cm_gemini_key');
   const suggestions = [
     'Who hasn\'t paid this month?',
     'Total dues outstanding',
@@ -4730,15 +4755,12 @@ function renderAsk() {
 
   const messagesHTML = RATHU.messages.length === 0 ? `
     <div class="ask-empty">
-      <div class="ask-empty-icon">${hasKey ? '🤖' : '🔑'}</div>
-      <div class="ask-empty-title">${hasKey ? 'Ask Rathu' : 'Setup needed'}</div>
-      <div class="ask-empty-sub">${hasKey
-        ? 'Ask anything about your chits, members, dues, or payments — in plain English.'
-        : 'Tap the ⚙️ icon in the top bar, paste your free Groq API key, and you\'re ready.'
-      }</div>
-      ${hasKey ? `<div class="ask-suggestions">
+      <div class="ask-empty-icon">🤖</div>
+      <div class="ask-empty-title">Ask Rathu</div>
+      <div class="ask-empty-sub">Ask anything about your chits, members, dues, or payments — in plain English.</div>
+      <div class="ask-suggestions">
         ${suggestions.map(s => `<button class="ask-suggestion" onclick="askSuggestion(this)">${s}</button>`).join('')}
-      </div>` : `<button class="btn-primary" style="margin-top:16px" onclick="openSettings()">⚙️ Add API Key</button>`}
+      </div>
     </div>` :
     RATHU.messages.map(msg => `
       <div class="ask-bubble ${msg.role}">
@@ -4753,11 +4775,24 @@ function renderAsk() {
   el.innerHTML = `
     <div class="ask-wrap" style="height:100%;display:flex;flex-direction:column;">
       <div class="ask-header">
-        <div class="ask-header-title">
-          <div class="ask-rathu-dot"></div>
-          Ask Rathu
+        <div style="display:flex;align-items:center;justify-content:space-between;">
+          <div class="ask-header-title">
+            <div class="ask-rathu-dot"></div>
+            Ask Rathu
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;">
+            ${RATHU.messages.length > 0 ? `
+            <button onclick="askClearChat()" title="Clear chat" style="background:none;border:1px solid var(--border2);border-radius:8px;padding:5px 10px;font-size:11px;font-weight:700;color:var(--ink3);cursor:pointer;font-family:inherit;display:flex;align-items:center;gap:5px;transition:all 0.15s;" onmouseover="this.style.borderColor='var(--red)';this.style.color='var(--red)'" onmouseout="this.style.borderColor='var(--border2)';this.style.color='var(--ink3)'">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="width:12px;height:12px;"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-3.36"/></svg>
+              Clear
+            </button>` : ''}
+            <button onclick="askShowKeyModal()" title="${getGeminiKey() ? 'API key set — click to change' : 'Add Gemini API key'}" style="background:${getGeminiKey() ? 'var(--green-pale)' : 'var(--gold-pale)'};border:1px solid ${getGeminiKey() ? 'rgba(42,122,90,0.25)' : 'var(--gold-border)'};border-radius:8px;padding:5px 10px;font-size:11px;font-weight:700;color:${getGeminiKey() ? 'var(--green)' : 'var(--gold)'};cursor:pointer;font-family:inherit;display:flex;align-items:center;gap:5px;">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="width:12px;height:12px;"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
+              ${getGeminiKey() ? 'Key ✓' : 'Add Key'}
+            </button>
+          </div>
         </div>
-        <div class="ask-header-sub">Powered by Gemini 2.5 Flash · knows all your chit data</div>
+        <div class="ask-header-sub">Powered by Gemini 2.0 · knows all your chit data</div>
       </div>
       <div class="ask-messages" id="ask-messages" style="flex:1;overflow-y:auto;padding:16px 20px;display:flex;flex-direction:column;gap:12px;">
         ${messagesHTML}
@@ -4801,50 +4836,61 @@ function askKeydown(e) {
 function askSuggestion(btn) {
   RATHU.send(btn.textContent);
 }
+
+function askClearChat() {
+  RATHU.messages = [];
+  renderAsk();
+}
+
+function askShowKeyModal() {
+  const existing = getGeminiKey();
+  // Build modal overlay
+  const overlay = document.createElement('div');
+  overlay.id = 'key-modal-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(28,26,23,0.5);z-index:9999;display:flex;align-items:center;justify-content:center;padding:24px;backdrop-filter:blur(2px);';
+  overlay.innerHTML = `
+    <div style="background:var(--cream);border-radius:20px;padding:24px;width:100%;max-width:360px;box-shadow:var(--shadow-lg);position:relative;">
+      <div style="font-family:'Playfair Display',serif;font-size:17px;font-weight:600;color:var(--ink);margin-bottom:6px;">Gemini API Key</div>
+      <div style="font-size:12px;color:var(--ink3);font-weight:500;margin-bottom:18px;line-height:1.5;">
+        Your key is stored only in this browser — never sent anywhere else. Get a free key at
+        <a href="https://aistudio.google.com/apikey" target="_blank" style="color:var(--gold);font-weight:700;">aistudio.google.com</a>.
+      </div>
+      <input id="key-modal-input" type="password" placeholder="AIza…" value="${existing}"
+        style="width:100%;border:1.5px solid var(--border2);border-radius:12px;padding:12px 14px;font-size:13px;font-weight:600;font-family:inherit;color:var(--ink);background:white;outline:none;margin-bottom:6px;"
+        onfocus="this.style.borderColor='var(--gold)'" onblur="this.style.borderColor='var(--border2)'">
+      <div style="display:flex;align-items:center;gap:6px;margin-bottom:16px;">
+        <input type="checkbox" id="key-show-cb" onchange="document.getElementById('key-modal-input').type=this.checked?'text':'password'" style="cursor:pointer;">
+        <label for="key-show-cb" style="font-size:12px;color:var(--ink3);font-weight:500;cursor:pointer;">Show key</label>
+      </div>
+      <div style="display:flex;gap:10px;">
+        ${existing ? `<button onclick="askRemoveKey()" style="flex:1;padding:11px;border-radius:12px;border:1.5px solid var(--red);background:var(--red-pale);color:var(--red);font-size:13px;font-weight:700;cursor:pointer;font-family:inherit;">Remove</button>` : ''}
+        <button onclick="document.getElementById('key-modal-overlay').remove()" style="flex:1;padding:11px;border-radius:12px;border:1.5px solid var(--border2);background:white;color:var(--ink2);font-size:13px;font-weight:700;cursor:pointer;font-family:inherit;">Cancel</button>
+        <button onclick="askSaveKey()" style="flex:1;padding:11px;border-radius:12px;border:none;background:var(--ink);color:white;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit;">Save</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+  setTimeout(() => document.getElementById('key-modal-input')?.focus(), 100);
+}
+
+function askSaveKey() {
+  const val = document.getElementById('key-modal-input')?.value?.trim();
+  if (!val) { alert('Please enter a key.'); return; }
+  setGeminiKey(val);
+  document.getElementById('key-modal-overlay')?.remove();
+  renderAsk(); // refresh header to show "Key ✓"
+}
+
+function askRemoveKey() {
+  if (!confirm('Remove API key from this browser?')) return;
+  clearGeminiKey();
+  document.getElementById('key-modal-overlay')?.remove();
+  renderAsk();
+}
 </script>
 
-// ═══════════════════════════════════════════════
-// SETTINGS — API KEY MANAGEMENT
-// ═══════════════════════════════════════════════
-function openSettings() {
-  const existing = localStorage.getItem('cm_gemini_key') || '';
-  const inp = document.getElementById('settings-groq-key');
-  inp.value = existing;
-  inp.type = 'password';
-  document.getElementById('key-toggle-btn').textContent = 'SHOW';
-  const status = document.getElementById('settings-key-status');
-  status.textContent = existing ? '✓ Key saved in this browser' : 'No key set yet';
-  status.style.color = existing ? 'var(--green)' : 'var(--ink4)';
-  openModal('settings-modal');
-}
-
-function saveGroqKey() {
-  const val = document.getElementById('settings-groq-key').value.trim();
-  const status = document.getElementById('settings-key-status');
-  if (!val) { status.textContent = 'Please paste your key first'; status.style.color = 'var(--red)'; return; }
-  if (!val.startsWith('AIza')) { status.textContent = 'Gemini keys start with AIza — check your key'; status.style.color = 'var(--red)'; return; }
-  localStorage.setItem('cm_gemini_key', val);
-  status.textContent = '✓ Key saved!';
-  status.style.color = 'var(--green)';
-  setTimeout(() => closeModal('settings-modal'), 800);
-}
-
-function clearGroqKey() {
-  localStorage.removeItem('cm_gemini_key');
-  document.getElementById('settings-groq-key').value = '';
-  const status = document.getElementById('settings-key-status');
-  status.textContent = 'Key cleared';
-  status.style.color = 'var(--ink4)';
-}
-
-function toggleKeyVisibility() {
-  const inp = document.getElementById('settings-groq-key');
-  const btn = document.getElementById('key-toggle-btn');
-  if (inp.type === 'password') { inp.type = 'text'; btn.textContent = 'HIDE'; }
-  else { inp.type = 'password'; btn.textContent = 'SHOW'; }
-}
-
-
+<script>
+  if ('serviceWorker' in navigator) {
     window.addEventListener('load', () => {
       navigator.serviceWorker.register('./sw.js')
         .then(reg => console.log('[PWA] Service Worker registered:', reg.scope))
@@ -4852,36 +4898,5 @@ function toggleKeyVisibility() {
     });
   }
 </script>
-<!-- SETTINGS MODAL -->
-<div class="modal-overlay" id="settings-modal" onclick="if(event.target===this)closeModal('settings-modal')">
-  <div class="modal" style="max-width:380px">
-    <div class="modal-header">
-      <div class="modal-title">Settings</div>
-      <button class="modal-close" onclick="closeModal('settings-modal')">×</button>
-    </div>
-    <div style="padding:20px">
-      <div class="slabel">Gemini API Key</div>
-      <div style="font-size:12px;color:var(--ink4);font-weight:500;margin-bottom:10px;line-height:1.5">
-        Get a free key at <strong>aistudio.google.com</strong> → Get API Key.<br>
-        Stored only in this browser — never uploaded anywhere.
-      </div>
-      <div style="position:relative">
-        <input class="fi" type="password" id="settings-groq-key"
-          placeholder="AIzaSy..."
-          style="padding-right:80px;font-family:monospace;font-size:12px;letter-spacing:0.5px">
-        <button onclick="toggleKeyVisibility()" id="key-toggle-btn"
-          style="position:absolute;right:8px;top:50%;transform:translateY(-50%);background:none;border:none;cursor:pointer;font-size:11px;font-weight:700;color:var(--ink3)">
-          SHOW
-        </button>
-      </div>
-      <div id="settings-key-status" style="font-size:11px;margin-top:6px;font-weight:600;min-height:16px"></div>
-      <div style="display:flex;gap:10px;margin-top:16px">
-        <button class="btn-secondary" style="flex:1" onclick="clearGroqKey()">Clear Key</button>
-        <button class="btn-primary" style="flex:1" onclick="saveGroqKey()">Save Key</button>
-      </div>
-    </div>
-  </div>
-</div>
-
 </body>
 </html>
