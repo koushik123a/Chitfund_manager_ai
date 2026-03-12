@@ -4600,44 +4600,132 @@ const RATHU = {
 
   // Build full DB context for Gemini
   buildContext() {
-    const members = DB.members.map(m => {
-      const due = memberTotalDue(m.id);
-      const paid = memberTotalPaid(m.id);
-      const slots = DB.chits.reduce((n, c) => n + (c.slots||[]).filter(s => s.memberId === m.id).length, 0);
-      const chits = DB.chits.filter(c => (c.slots||[]).some(s => s.memberId === m.id)).map(c => c.name);
-      return `${m.name} (phone: ${m.phone||'none'}, slots: ${slots}, chits: ${chits.join('/')}, paid: ₹${paid.toLocaleString('en-IN')}, due: ₹${due.toLocaleString('en-IN')})`;
-    }).join('\n');
+    const today = new Date();
+    const oneYearAgo = new Date(today); oneYearAgo.setFullYear(today.getFullYear() - 1);
 
+    // ── MEMBERS with full payment history ──
+    const members = DB.members.map(m => {
+      const memberChits = DB.chits.filter(c => (c.slots||[]).some(s => s.memberId === m.id));
+      const totalPaid = memberTotalPaid(m.id);
+      const totalDue = memberTotalDue(m.id);
+      const chitDetails = memberChits.map(c => {
+        const slot = (c.slots||[]).find(s => s.memberId === m.id);
+        if (!slot) return '';
+        const curIdx = currentMonthIdx(c);
+        const months = [];
+        for (let i = 0; i <= curIdx; i++) {
+          const label = monthLabel(c, i);
+          const pay = getPayment(c, slot.id, i);
+          const expected = slotExpected(c, slot, i);
+          if (pay.status === 'paid') months.push(`${label}:paid(₹${expected})`);
+          else if (pay.status === 'partial') months.push(`${label}:partial(₹${pay.paidAmount||0}/₹${expected})`);
+          else if (isPastGrace(c, i)) months.push(`${label}:UNPAID(₹${expected})`);
+          else months.push(`${label}:pending`);
+        }
+        const slotDue = slotDueAmount(c, slot.id);
+        return `    Chit "${c.name}" (monthly: ₹${slotExpected(c, slot, curIdx)}, overdue: ₹${slotDue}): ${months.join(', ')}`;
+      }).join('\n');
+      return `${m.name} (phone: ${m.phone||'none'}, total paid: ₹${totalPaid.toLocaleString('en-IN')}, total overdue: ₹${totalDue.toLocaleString('en-IN')}, in ${memberChits.length} chit(s)):\n${chitDetails || '    No chits'}`;
+    }).join('\n\n');
+
+    // ── CHITS with brokerage ──
     const chits = DB.chits.map(c => {
       const curIdx = currentMonthIdx(c);
       const slots = c.slots || [];
-      const totalDue = slots.reduce((s, sl) => s + slotDueAmount(c, sl.id), 0);
+      const brokeragePerMonth = Number(c.brokerage) || 0;
+      const monthsRun = curIdx + 1;
+      const winners = Object.entries(c.winners || {}).map(([idx, w]) => {
+        const winSlot = slots.find(s => s.id === w.slotId);
+        const m = winSlot ? getMember(winSlot.memberId) : null;
+        return `month ${Number(idx)+1}: ${m?.name||'unknown'} won ₹${Number(w.amount||c.amount).toLocaleString('en-IN')}`;
+      }).join(', ');
       const paidCount = slots.filter(sl => getPayment(c, sl.id, curIdx).status === 'paid').length;
-      return `"${c.name}" (${c.status||'active'}, ₹${Number(c.amount).toLocaleString('en-IN')}, ${slots.length} slots, month ${curIdx+1}/${c.tenure}, ${paidCount}/${slots.length} paid this month, total due: ₹${totalDue.toLocaleString('en-IN')})`;
-    }).join('\n');
+      const partialCount = slots.filter(sl => getPayment(c, sl.id, curIdx).status === 'partial').length;
+      const unpaidCount = slots.filter(sl => getPayment(c, sl.id, curIdx).status === 'unpaid' && isPastGrace(c, curIdx)).length;
+      let brokerageLastYear = 0;
+      if (brokeragePerMonth > 0 && c.startDate) {
+        const start = new Date(c.startDate);
+        for (let i = 0; i < monthsRun; i++) {
+          const d = new Date(start); d.setMonth(d.getMonth() + i);
+          if (d >= oneYearAgo && d <= today) brokerageLastYear += brokeragePerMonth;
+        }
+      } else { brokerageLastYear = brokeragePerMonth * Math.min(monthsRun, 12); }
+      return `"${c.name}" — ${c.status||'active'}, started: ${c.startDate||'unknown'}, value: ₹${Number(c.amount).toLocaleString('en-IN')}, tenure: ${c.tenure} months, current month: ${monthsRun}/${c.tenure}, slots: ${slots.length}
+  This month: ${paidCount} paid, ${partialCount} partial, ${unpaidCount} overdue
+  Brokerage: ₹${brokeragePerMonth.toLocaleString('en-IN')}/mo, earned so far: ₹${(brokeragePerMonth*monthsRun).toLocaleString('en-IN')} (last 12 months: ₹${brokerageLastYear.toLocaleString('en-IN')})
+  ${winners ? `Winners: ${winners}` : 'No winners yet'}`;
+    }).join('\n\n');
 
+    // ── LOANS GIVEN (Majeti lent money → earns interest) ──
     const loans = (DB.loans||[]).map(l => {
       const m = getMember(l.memberId);
       const accrued = loanAccruedInterest(l);
       const paid = loanTotalPaid(l);
-      return `Loan to ${m.name}: ₹${Number(l.principal).toLocaleString('en-IN')} @ ${l.rate}%/mo, accrued: ₹${accrued.toLocaleString('en-IN')}, paid: ₹${paid.toLocaleString('en-IN')}, status: ${l.status}`;
-    }).join('\n');
+      const interestDue = loanInterestDue(l);
+      const payHistory = (l.payments||[]).map(p => `${p.date}:₹${Number(p.amount).toLocaleString('en-IN')}`).join(', ');
+      return `Loan to ${m?.name||'unknown'}: principal ₹${Number(l.principal).toLocaleString('en-IN')} @ ${l.rate}%/mo, given: ${l.startDate||'unknown'}, status: ${l.status}
+  Accrued interest: ₹${accrued.toLocaleString('en-IN')}, interest collected: ₹${paid.toLocaleString('en-IN')}, interest still owed to Majeti: ₹${interestDue.toLocaleString('en-IN')}
+  Payment history: ${payHistory || 'none'}`;
+    }).join('\n\n');
+
+    // ── BORROWINGS (Majeti borrowed money → pays interest) ──
+    const borrowings = (DB.borrowings||[]).map(b => {
+      const accrued = borrowAccruedInterest(b);
+      const paid = borrowTotalPaid(b);
+      const due = borrowInterestDue(b);
+      const payHistory = (b.payments||[]).map(p => `${p.date}:₹${Number(p.amount).toLocaleString('en-IN')}`).join(', ');
+      return `Borrowed from ${b.name||'unknown'} (${b.phone||'no phone'}): principal ₹${Number(b.principal).toLocaleString('en-IN')} @ ${b.rate}%/mo, since: ${b.startDate||'unknown'}, status: ${b.status}
+  Accrued interest owed: ₹${accrued.toLocaleString('en-IN')}, interest paid so far: ₹${paid.toLocaleString('en-IN')}, interest still owed by Majeti: ₹${due.toLocaleString('en-IN')}
+  Payment history: ${payHistory || 'none'}`;
+    }).join('\n\n');
+
+    // ── INTEREST SUMMARY (pre-calculated for accuracy) ──
+    const totalInterestReceivable = (DB.loans||[]).reduce((s,l) => s + loanInterestDue(l), 0);
+    const totalInterestPayable = (DB.borrowings||[]).reduce((s,b) => s + borrowInterestDue(b), 0);
+    const totalInterestEarned = (DB.loans||[]).reduce((s,l) => s + loanTotalPaid(l), 0);
+    const totalInterestPaid = (DB.borrowings||[]).reduce((s,b) => s + borrowTotalPaid(b), 0);
+
+    // ── BROKERAGE SUMMARY ──
+    const totalMonthlyBrokerage = DB.chits.reduce((s,c) => s + (Number(c.brokerage)||0), 0);
+    const totalBrokerageAllTime = DB.chits.reduce((s,c) => s + (Number(c.brokerage)||0) * (currentMonthIdx(c)+1), 0);
+    const totalBrokerageLastYear = DB.chits.reduce((s,c) => {
+      const bpm = Number(c.brokerage)||0;
+      if (!bpm) return s;
+      if (!c.startDate) return s + bpm * Math.min(currentMonthIdx(c)+1, 12);
+      const start = new Date(c.startDate);
+      const months = currentMonthIdx(c)+1;
+      let count = 0;
+      for (let i = 0; i < months; i++) {
+        const d = new Date(start); d.setMonth(d.getMonth()+i);
+        if (d >= oneYearAgo && d <= today) count++;
+      }
+      return s + bpm * count;
+    }, 0);
 
     return `You are Rathu, a helpful assistant for Ratna Chits — a chit fund business in Guntur, India run by Majeti.
-Answer questions about members, payments, dues, chits, and loans clearly and concisely.
+Answer questions about members, payments, dues, chits, loans, borrowings, brokerage, and interest clearly and concisely.
 Always use Indian number formatting (lakhs, thousands). Be friendly and direct.
+Use pre-calculated summary totals for arithmetic — do not re-sum large lists yourself.
 If asked to remind someone on WhatsApp, say you'll open it and end your reply with: ACTION:WHATSAPP:<memberId>
-Today's date: ${new Date().toLocaleDateString('en-IN', {weekday:'long', year:'numeric', month:'long', day:'numeric'})}.
+Today's date: ${today.toLocaleDateString('en-IN', {weekday:'long', year:'numeric', month:'long', day:'numeric'})}.
 
-CURRENT DATA:
-MEMBERS (${DB.members.length} total):
+FINANCIAL SUMMARY (pre-calculated):
+  Brokerage — monthly run rate: ₹${totalMonthlyBrokerage.toLocaleString('en-IN')}/mo, last 12 months: ₹${totalBrokerageLastYear.toLocaleString('en-IN')}, all-time: ₹${totalBrokerageAllTime.toLocaleString('en-IN')}
+  Loan interest — earned (collected): ₹${totalInterestEarned.toLocaleString('en-IN')}, still receivable: ₹${totalInterestReceivable.toLocaleString('en-IN')}
+  Borrow interest — paid out: ₹${totalInterestPaid.toLocaleString('en-IN')}, still owed by Majeti: ₹${totalInterestPayable.toLocaleString('en-IN')}
+  Net interest position: ₹${(totalInterestEarned - totalInterestPaid).toLocaleString('en-IN')} (earned minus paid)
+
+MEMBERS (${DB.members.length} total) — month-by-month payment status per chit:
 ${members || 'No members yet.'}
 
 CHITS (${DB.chits.length} total):
 ${chits || 'No chits yet.'}
 
-LOANS:
-${loans || 'No loans recorded.'}`;
+LOANS GIVEN by Majeti (${(DB.loans||[]).length} total — Majeti earns interest on these):
+${loans || 'No loans recorded.'}
+
+BORROWINGS by Majeti (${(DB.borrowings||[]).length} total — Majeti pays interest on these):
+${borrowings || 'No borrowings recorded.'}`;
   },
 
   // Call Gemini API with model fallback
@@ -4657,7 +4745,7 @@ ${loans || 'No loans recorded.'}`;
     const body = JSON.stringify({
       system_instruction: { parts: [{ text: systemCtx }] },
       contents,
-      generationConfig: { maxOutputTokens: 100000, temperature: 0.3 }
+      generationConfig: { maxOutputTokens: 2048, temperature: 0.3 }
     });
 
     // Try models in order until one works
