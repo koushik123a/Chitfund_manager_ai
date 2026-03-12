@@ -4657,7 +4657,7 @@ ${loans || 'No loans recorded.'}`;
     const body = JSON.stringify({
       system_instruction: { parts: [{ text: systemCtx }] },
       contents,
-      generationConfig: { maxOutputTokens: 2048, temperature: 0.3 }
+      generationConfig: { maxOutputTokens: 100000, temperature: 0.3 }
     });
 
     // Try models in order until one works
