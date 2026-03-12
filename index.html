@@ -4589,7 +4589,7 @@ function confirmCloseLoan() {
 // ═══════════════════════════════════════════════
 
 // ── EDIT YOUR API KEY HERE ──────────────────────
-const GEMINI_KEY = 'PASTE_YOUR_KEY_HERE';
+const GEMINI_KEY = 'AIzaSyD-KxaWO1DovTbFfSlg7u8qVt-ioI3M4-A';
 // ───────────────────────────────────────────────
 
 const RATHU = {
@@ -4658,7 +4658,7 @@ ${loans || 'No loans recorded.'}`;
     });
 
     // Try models in order until one works
-    const models = ['gemini-2.0-flash-lite', 'gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-2.5-flash'];
+    const models = ['gemini-2.0-flash-lite', 'gemini-2.0-flash-001', 'gemini-2.0-flash', 'gemini-2.5-flash'];
     let lastError = null;
     for (const model of models) {
       try {
